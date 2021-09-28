@@ -14,15 +14,47 @@ export function getParameterNameList(editor: vscode.TextEditor, languageParamete
         const shouldHideRedundantAnnotations = vscode.workspace.getConfiguration('inline-parameters').get('hideRedundantAnnotations')
 
         if (description && description.length > 0) {
-            try {
-                const functionDefinitionRegex = /[^ ](?!^)\((.*)\)\:/gm
-                let definition = description[0].contents[0].value.match(functionDefinitionRegex)
+            try { 
+                let definition = description[0].contents[0].value;
+                // Find the bracket matching () => or () :
+                let pos = [0, -1];
+                let bracketsCount = 0;
+                let isFindingBrackets = false;
+                for (let i = definition.length - 1; i >= 0; i--) {
+                    const e = definition[i];
+                    switch (e) {
+                        case ")":
+                            if (bracketsCount === 0 && isFindingBrackets) pos[1] = i;
+                            bracketsCount ++;
+                            break;
+                        case "(":
+                            bracketsCount --;
+                            if (bracketsCount === 0 && isFindingBrackets) {
+                                pos[0] = i;
+                                isFindingBrackets = false;
+                            }
+                            break;
+                        case ":":
+                        case "=":
+                            if (bracketsCount === 0)
+                                isFindingBrackets = true;
+                            break;
+                        case " ":
+                            break;
+                        default:
+                            if (bracketsCount === 0) isFindingBrackets = false;
+                            break;
+                    }
+                }
+                definition = definition.slice(pos[0], pos[1] + 1);
 
                 if (!definition || definition.length === 0) {
                     return reject()
                 }
 
-                definition = definition[0].slice(2, -2)
+                definition = definition.slice(1, -1)
+                    .replace(/\<.*?\>/g,'')
+                    .replace(/\(.*?\)/g,'');
 
                 const jsParameterNameRegex = /^[a-zA-Z_$]([0-9a-zA-Z_$]+)?/g
 
@@ -42,6 +74,11 @@ export function getParameterNameList(editor: vscode.TextEditor, languageParamete
 
                         return parameter
                     })
+
+                // Typescript allows "this" type
+                if (parameters[0] === "this") {
+                    parameters.shift();
+                }
             } catch (err) {
                 console.error(err)
             }
