@@ -3,23 +3,36 @@ import { removeShebang, ParameterPosition, showVariadicNumbers } from '../utils'
 
 import { parse as javaparse, walk, ParseTree, JavaParserListener, MethodCallContext, ExpressionContext, ArgumentsContext } from 'java-ast'
 
-export function getParameterName(editor: vscode.TextEditor, position: vscode.Position, key: number, namedValue?: string) {
+export function getParameterNameList(editor: vscode.TextEditor, languageParameters: ParameterPosition[]): Promise<string[]> {
     return new Promise(async (resolve, reject) => {
         let isVariadic = false
         let parameters: any[]
-        const description: any = await vscode.commands.executeCommand<vscode.Hover[]>('vscode.executeHoverProvider', editor.document.uri, position)
+        const firstParameter = languageParameters[0]
+        const description: any = await vscode.commands.executeCommand<vscode.Hover[]>('vscode.executeHoverProvider', editor.document.uri, new vscode.Position(
+            firstParameter.expression.line,
+            firstParameter.expression.character
+        ))
+
         const shouldHideRedundantAnnotations = vscode.workspace.getConfiguration('inline-parameters').get('hideRedundantAnnotations')
 
         if (description && description.length > 0) {
             try {
-                const functionDefinitionRegex = /[^ ](?!^)\((.*)\)/gm
-                let definition = description[0].contents[0].value.match(functionDefinitionRegex)
+                const functionDefinitionRegex = /[^ ](?!^)\((?!command:)(.*)\)/gm
 
+                let definition
+                let index = 0
+
+                while (index < description[0].contents.length && (!definition || definition.length === 0)) {
+                    definition = description[0].contents[index].value.match(functionDefinitionRegex)
+                    index++
+                }
+         
                 if (!definition || definition.length === 0) {
                     return reject()
                 }
 
                 definition = definition[0].slice(2, -1)
+                    .replace(/\<.*?\>/g,'');
 
                 const jsParameterNameRegex = /[a-zA-Z_$][0-9a-zA-Z_$]*$/g
 
@@ -47,42 +60,51 @@ export function getParameterName(editor: vscode.TextEditor, position: vscode.Pos
             return reject()
         }
 
-        if (isVariadic && key >= parameters.length - 1) {
-            let name = parameters[parameters.length - 1]
+        let namedValueName = undefined;
+        const parametersLength = parameters.length;
+        for (let i = 0; i < languageParameters.length; i++) {
+            const parameter = languageParameters[i];
+            const key = parameter.key;
 
-            if (shouldHideRedundantAnnotations && name === namedValue) {
-                return reject()
+            if (isVariadic && key >= parameters.length - 1) {
+                if (namedValueName === undefined) namedValueName = parameters[parameters.length - 1]
+
+                if (shouldHideRedundantAnnotations && namedValueName === parameter.namedValue) {
+                    parameters[i] = undefined
+                    continue;
+                }
+
+                parameters[i] = showVariadicNumbers(namedValueName, -parametersLength + 1 + key)
+                continue;
             }
 
-            name = showVariadicNumbers(name, -parameters.length + 1 + key)
+            if (parameters[key]) {
+                let name = parameters[key]
 
-            return resolve(name)
-        }
-
-        if (parameters[key]) {
-            let name = parameters[key]
-
-            if (shouldHideRedundantAnnotations && name === namedValue) {
-                return reject()
+                if (shouldHideRedundantAnnotations && name === parameter.namedValue) {
+                    parameters[i] = undefined
+                }
+                continue;
             }
 
-            return resolve(name)
+            parameters[i] = undefined
+            continue;
         }
 
-        return reject()
+        return resolve(parameters)
     })
 }
 
-export function parse(code: string): ParameterPosition[] {
+export function parse(code: string): ParameterPosition[][] {
     code = removeShebang(code)
     const ast = javaparse(code)
     const editor = vscode.window.activeTextEditor
 
     const functionCalls: any[] = getFunctionCalls(ast)
-    let parameters: ParameterPosition[] = []
+    let parameters: ParameterPosition[][] = []
 
     for (const call of functionCalls) {
-        parameters = getParametersFromMethod(editor, call, parameters)
+        parameters.push(getParametersFromMethod(editor, call))
     }
 
     return parameters
@@ -95,13 +117,13 @@ function getFunctionCalls(ast: ParseTree): any[] {
 
     class JavaMethodListener implements JavaParserListener {
         enterArguments = (args: ArgumentsContext) => {
-            const params = args.expressionList().expression()
+            const params = args.expressionList()?.expression() || []
             if (!(hideSingleParameters && params.length === 1)) {
                 functionCalls.push(args);
             }
         }
         enterMethodCall = (method: MethodCallContext) => {
-            const params = method.expressionList().expression()
+            const params = method.expressionList()?.expression() || []
             if (!(hideSingleParameters && params.length === 1)) {
                 functionCalls.push(method);
             }
@@ -122,15 +144,15 @@ function position(parameter) {
     return "[" + start + " - " + end + "] @ " + exp
 }
 
-function getParametersFromMethod(editor: vscode.TextEditor, method: any, parameters: ParameterPosition[]): ParameterPosition[] {
+function getParametersFromMethod(editor: vscode.TextEditor, method: any): ParameterPosition[] | undefined {
 
-    let params = method.expressionList().expression()
+    if (!method.expressionList()) {
+        return undefined;
+    }
 
-    params.forEach((param, key) => {
-        parameters.push(parseParam(editor, method, param, key))
-    })
-
-    return parameters
+    return method.expressionList().expression().map((param, key) => {
+        return parseParam(editor, method, param, key)
+    });
 }
 
 function parseParam(editor: vscode.TextEditor, expression: any, argument: ExpressionContext, key: number): ParameterPosition {
